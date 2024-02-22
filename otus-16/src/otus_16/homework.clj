@@ -36,19 +36,31 @@
 (defn update-helper:urls-per-referrer [referrer parsed-line]
     (fn [acc]
         (if (or (= referrer (:referrer parsed-line)) (= referrer :all))
-            (conj acc (:url (:request parsed-line)))
+            (conj! acc (:url (:request parsed-line)))
             acc)))
 
+(defn update!
+    ([m k f]
+     (assoc! m k (f (get m k))))
+    ([m k f x]
+     (assoc! m k (f (get m k) x))))
+
 (defn parse-logs-portion [url referrer log-lines]
-    (let [parsed-lines (map parse-apache-log log-lines)]
-        (reduce
-            (fn [acc {:keys [size] :as parsed-line}]
-                (-> acc
-                    (update :total-bytes + size)
-                    (update :bytes-per-url (update-helper:bytes-per-url url parsed-line size))
-                    (update :urls-per-referrer (update-helper:urls-per-referrer referrer parsed-line))))
-            start-result-state
-            parsed-lines)))
+    (let [parsed-lines (map parse-apache-log log-lines)
+          start-result-state (transient {:total-bytes       0
+                                         :bytes-per-url     0
+                                         :urls-per-referrer (transient #{})})
+          result-with-trans (reduce                  ;reduce???
+                                (fn [acc {:keys [size] :as parsed-line}]
+                                    (-> acc
+                                        (update! :total-bytes + size)
+                                        (update! :bytes-per-url (update-helper:bytes-per-url url parsed-line size))
+                                        (update! :urls-per-referrer (update-helper:urls-per-referrer referrer parsed-line))))
+                                start-result-state
+                                parsed-lines)]
+        (persistent! (update! result-with-trans
+                :urls-per-referrer
+                persistent!))))
 
 (def merge-results
     (partial merge-with (fn [x y]
@@ -57,7 +69,7 @@
                                 (+ x y)))))
 
 (defn reduce-results [coll]
-    (doall (reduce merge-results start-result-state coll)))
+    (reduce merge-results start-result-state coll))
 
 (defn parallel-parse-file [url referrer file]
     (with-open [rdr (clojure.java.io/reader file)]
@@ -76,12 +88,25 @@
                      file-seq
                      (filter #(.isFile %)))
           result-with-urls (->> files
-                                (pmap (partial parallel-parse-file url referrer))
+                                (mapv (partial parallel-parse-file url referrer))
                                 (reduce-results))]
         (update result-with-urls :urls-per-referrer count)))
 
 
 (comment
+
+    (def aa (with-open [rdr (clojure.java.io/reader "logs/access.log.2")]
+        (->> rdr
+             (line-seq)
+             (partition-all 100000)
+             (first)
+             (parse-logs-portion :all :all)
+             ;(pmap (partial parse-logs-portion :all :all))
+             ;(doall)
+             )))
+
+    (parallel-parse-file :all :all (clojure.java.io/file "logs/access.log.2"))
+
     ;; возможные вызовы функции
     (time (solution))
     (time (solution :url "/random"))
